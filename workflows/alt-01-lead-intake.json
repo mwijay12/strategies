@@ -1,0 +1,107 @@
+{
+  "name": "ALT-01 · Lead Intake → AI Qualify → Telegram Alert (starter)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Webhook ya Lead",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-120, 300],
+      "webhookId": "a1000000-0000-4000-8000-00000000aa01",
+      "notes": "POST /webhook/lead-intake  ·  body: {name, phone, need, budget, source}"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 1) Safisha na hakiki namba ya simu ya Tanzania, rudisha item moja kwa lead\nconst out = [];\nfor (const item of $input.all()) {\n  const b = item.json.body ?? item.json;\n  let phone = String(b.phone ?? '').replace(/[^0-9+]/g, '');\n  if (phone.startsWith('00')) phone = phone.slice(2);\n  if (phone.startsWith('0')) phone = '+255' + phone.slice(1);\n  else if (phone.startsWith('255')) phone = '+' + phone;\n  if (!/^\\+255\\d{9}$/.test(phone)) continue; // lead isiyo na simu sahihi inaachwa\n\n  out.push({ json: {\n    name: String(b.name ?? 'Bila jina').trim(),\n    phone,\n    need: String(b.need ?? b.message ?? '').trim().slice(0, 800),\n    budget: Number(b.budget ?? 0),\n    source: String(b.source ?? 'website'),\n    received_at: new Date().toISOString()\n  }});\n}\nreturn out;"
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Hakiki & Safisha",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 300],
+      "notes": "Ondoa leads zisizo na namba sahihi (+255XXXXXXXXX). Badilisha kanuni kama unahitaji namba za nje."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.OPENROUTER_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'google/gemini-2.5-flash', temperature: 0.2, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'Wewe ni msaidizi wa mauzo wa Altraware Technology (Dar es Salaam). Pima lead hii kwa HOT, WARM au COLD. Jibu JSON pekee: {\"score\":\"HOT|WARM|COLD\",\"reason\":\"sababu moja kwa mistari 1-2 kwa Kiswahili\",\"summary\":\"muhtasari wa mistari 2 kwa Kiswahili\",\"next_action\":\"hatua moja inayofuata\"}. HOT = ana bajeti, ana tatizo la wazi, anaweza kuamua. COLD = anataka tu bei ya bure au hayuko serious.' }, { role: 'user', content: 'Jina: ' + $json.name + ' | Simu: ' + $json.phone + ' | Anahitaji: ' + $json.need + ' | Bajeti (TZS): ' + $json.budget + ' | Chanzo: ' + $json.source } ] }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "AI Qualify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 300],
+      "notes": "Weka OPENROUTER_API_KEY kwenye env ya container (au badilisha kwa n8n credential ya OpenAI)."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 2) Changanua jibu la AI; usianze kuanguka kama JSON ni mbovu\nconst lead = $('Hakiki & Safisha').first().json;\nconst raw = $json.choices?.[0]?.message?.content ?? '{}';\nlet d = {};\ntry { d = JSON.parse(String(raw).replace(/```json|```/g, '').trim()); }\ncatch (e) { d = { score: 'WARM', reason: 'AI parse error - hakiki kwa mkono', summary: '', next_action: 'Piga simu' }; }\n\nconst emoji = d.score === 'HOT' ? '🔥' : d.score === 'COLD' ? '❄️' : '🌤️';\nconst text = emoji + ' LEAD MPYA (' + d.score + ')\\n\\n' +\n  '👤 ' + lead.name + '\\n' +\n  '📞 ' + lead.phone + '\\n' +\n  '🎯 ' + (lead.need || 'hakuna maelezo').slice(0, 200) + '\\n' +\n  '💰 Bajeti: ' + (lead.budget ? 'TZS ' + lead.budget.toLocaleString('en-US') : 'haijatajwa') + '\\n' +\n  '📥 Chanzo: ' + lead.source + '\\n\\n' +\n  '🧠 ' + (d.reason || '') + '\\n' +\n  '➡️ Hatua: ' + (d.next_action || 'Piga simu leo');\n\nreturn [{ json: { ...lead, score: d.score ?? 'WARM', reason: d.reason ?? '', text, wa_link: 'https://wa.me/' + lead.phone.replace('+', '') } }];"
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Tengeneza Ujumbe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $env.ALERT_CHAT_ID }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "reply_markup": {
+            "inline_keyboard": [
+              [
+                { "text": "📞 Nimepiga simu", "url": "={{ $json.wa_link }}" },
+                { "text": "✅ Nimefanya", "callback_data": "=done:{{ $json.phone }}" }
+              ]
+            ]
+          }
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Telegram Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [680, 300],
+      "notes": "Credential: Telegram Bot (BotFather). ALERT_CHAT_ID = chat_id yako ya kibinafsi au group ya mauzo."
+    }
+  ],
+  "connections": {
+    "Webhook ya Lead": { "main": [[{ "node": "Hakiki & Safisha", "type": "main", "index": 0 }]] },
+    "Hakiki & Safisha": { "main": [[{ "node": "AI Qualify", "type": "main", "index": 0 }]] },
+    "AI Qualify": { "main": [[{ "node": "Tengeneza Ujumbe", "type": "main", "index": 0 }]] },
+    "Tengeneza Ujumbe": { "main": [[{ "node": "Telegram Alert", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
